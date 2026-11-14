@@ -14,7 +14,6 @@ namespace StopTheClip.Structures
     {
         [FieldOffset(0x0)] public vtblTask* vtbl;
 
-        [VirtualFunction(1)]
         public unsafe void vf1(float* taskItem)
         {
             fixed (GameTask* ptr = &this)

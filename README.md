@@ -40,6 +40,10 @@ You can also download `latest.zip` from the [releases page](https://github.com/a
 
 Settings from StopTheClip are carried over the first time the plugin loads.
 
+## Combat and PvP
+
+Fresh Set of Eyes pauses itself in combat and in PvP areas: the game's normal camera and clipping come back until you're out. Both can be switched back on under **General → Experimental**.
+
 ## Build
 
 Requires the .NET 10 SDK and a Dalamud install (API 15).
@@ -49,6 +53,16 @@ DALAMUD_HOME=/path/to/dalamud/Hooks/dev dotnet build -c Release StopTheClip/Stop
 ```
 
 The packaged plugin is written to `StopTheClip/bin/Release/FreshSetOfEyes/latest.zip`.
+
+## How it was made
+
+AI use: **Copilot** level, in the terms of Dalamud's AI usage policy. I forked this plugin from ProjectMimer's StopTheClip, which appears to be discontinued, and later stopped maintaining my fork as well. To bring it up to date and add a true first-person camera, I used Claude (through Claude Code) to write the code. I directed the work and tested every change in game myself before moving on. No automated or unattended workflow was used at any point.
+
+The icon is AI-generated. I'm not a graphic designer, so it will do for now. If you'd like to make a proper one, DM me!
+
+## Licence
+
+My changes are released under the [MIT licence](LICENSE). The original StopTheClip code by ProjectMimer was published without a licence file; it remains theirs.
 
 ## Credits
 

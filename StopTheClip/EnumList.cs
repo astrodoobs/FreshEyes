@@ -6,14 +6,6 @@ namespace StopTheClip
 {
 
     [Flags]
-    public enum CameraModes
-    {
-        None = -1,
-        FirstPerson = 0,
-        ThirdPerson = 1,
-    }
-
-    [Flags]
     public enum ModelCullTypes : byte
     {
         None = 0,

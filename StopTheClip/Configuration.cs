@@ -13,6 +13,13 @@ namespace StopTheClip
         // True first person: the camera is pinned to the character's eyes every
         // frame (so it follows emotes/animations) and the head is hidden
         //----
+        //----
+        // Experimental: by default the whole plugin stands down in combat and
+        // in PvP
+        //----
+        public bool AllowInCombat { get; set; } = false;
+        public bool AllowInPvP { get; set; } = false;
+
         public bool FirstPersonFix { get; set; } = true;
         public bool GposeFirstPerson { get; set; } = true;   // zoomed fully in during group pose counts as first person
         public bool HideHead { get; set; } = true;

@@ -1,55 +1,66 @@
 ﻿using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Windowing;
 using System;
 using System.Numerics;
 
 namespace StopTheClip
 {
-    public static class PluginUI
+    public sealed class PluginUI : Window
     {
-        public static bool isVisible = false;
+        private readonly Plugin plugin;
+        private readonly Action drawDebug;
 
-        public static void Draw(ref bool isEnabled, Configuration config, Action drawDebug)
+        public PluginUI(Plugin plugin, Action drawDebug) : base("Fresh Set of Eyes")
         {
-            if (!isVisible)
-                return;
-
-            ImGui.SetNextWindowSize(new Vector2(380, 440), ImGuiCond.FirstUseEver);
-            ImGui.SetNextWindowSizeConstraints(new Vector2(330, 260), new Vector2(9999));
-
-            if (ImGui.Begin("Fresh Set of Eyes", ref isVisible))
+            this.plugin = plugin;
+            this.drawDebug = drawDebug;
+            Size = new Vector2(380, 440);
+            SizeCondition = ImGuiCond.FirstUseEver;
+            SizeConstraints = new WindowSizeConstraints
             {
-                if (ImGui.BeginTabBar("##stcTabs"))
+                MinimumSize = new Vector2(330, 260),
+                MaximumSize = new Vector2(9999, 9999),
+            };
+        }
+
+        public override void Draw()
+        {
+            Configuration config = Plugin.Config;
+            bool isEnabled = plugin.IsEnabled;
+
+            if (ImGui.BeginTabBar("##stcTabs"))
+            {
+                if (ImGui.BeginTabItem("General"))
                 {
-                    if (ImGui.BeginTabItem("General"))
-                    {
-                        DrawGeneral(ref isEnabled, config);
-                        ImGui.EndTabItem();
-                    }
-                    if (ImGui.BeginTabItem("First Person"))
-                    {
-                        DrawFirstPerson(isEnabled, config);
-                        ImGui.EndTabItem();
-                    }
-                    if (ImGui.BeginTabItem("Head & Targeting"))
-                    {
-                        DrawHead(isEnabled, config);
-                        ImGui.EndTabItem();
-                    }
-                    if (ImGui.BeginTabItem("Debug"))
-                    {
-                        drawDebug();
-                        ImGui.EndTabItem();
-                    }
-                    ImGui.EndTabBar();
+                    DrawGeneral(ref isEnabled, config);
+                    ImGui.EndTabItem();
                 }
+                if (ImGui.BeginTabItem("First Person"))
+                {
+                    DrawFirstPerson(isEnabled, config);
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem("Head & Targeting"))
+                {
+                    DrawHead(isEnabled, config);
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem("Debug"))
+                {
+                    drawDebug();
+                    ImGui.EndTabItem();
+                }
+                ImGui.EndTabBar();
             }
-            ImGui.End();
+
+            if (isEnabled != plugin.IsEnabled)
+                plugin.Toggle();
         }
 
         //----
         // Tabs
         //----
-        private static void DrawGeneral(ref bool isEnabled, Configuration config)
+        private void DrawGeneral(ref bool isEnabled, Configuration config)
         {
             ImGui.Spacing();
             ImGui.Checkbox("Enable Fresh Set of Eyes", ref isEnabled);
@@ -68,6 +79,18 @@ namespace StopTheClip
 
             ImGui.Spacing();
             ImGui.TextDisabled("Zoom all the way in to enter first person.");
+
+            ImGui.Spacing();
+            Section("Experimental");
+            ImGui.TextDisabled("Fresh Set of Eyes pauses itself in combat and in PvP.\nThese keep it running there.");
+            ImGui.BeginDisabled(!isEnabled);
+            Checkbox("Keep running in combat", config.AllowInCombat, v => config.AllowInCombat = v, config,
+                "Off: the game's normal camera returns while you're in combat.\nOn: first person and the close-up fixes stay active in combat.");
+            Checkbox("Keep running in PvP", config.AllowInPvP, v => config.AllowInPvP = v, config,
+                "Off: the game's normal camera is used in PvP areas.\nOn: first person and the close-up fixes stay active in PvP.");
+            ImGui.EndDisabled();
+            if (plugin.SuspendReason != null)
+                ImGui.TextColored(new Vector4(1.0f, 0.75f, 0.3f, 1.0f), plugin.SuspendReason + ".");
             if (!isEnabled)
                 ImGui.TextDisabled("Fresh Set of Eyes is disabled.");
         }

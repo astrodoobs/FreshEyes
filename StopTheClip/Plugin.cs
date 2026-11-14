@@ -6,7 +6,7 @@ using Dalamud.Game.Command;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Hooking;
-using Dalamud.Utility.Signatures;
+using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -20,7 +20,6 @@ using CameraControlMode = FFXIVClientStructs.FFXIV.Client.Game.CameraControlMode
 using RenderCamera = FFXIVClientStructs.FFXIV.Client.Graphics.Render.Camera;
 
 using StopTheClip.Structures;
-using MemoryManager.Structures;
 
 
 namespace StopTheClip
@@ -33,14 +32,12 @@ namespace StopTheClip
         [PluginService] public static IClientState? ClientState { get; private set; } = null;
         [PluginService] public static IObjectTable? ObjectTable { get; private set; } = null;
         [PluginService] public static IPartyList? PartyList { get; private set; } = null;
-        [PluginService] public static ISigScanner? SigScanner { get; private set; } = null;
         [PluginService] public static IChatGui? ChatGui { get; private set; } = null;
         [PluginService] public static IGameGui? GameGui { get; private set; } = null;
         [PluginService] public static ICondition? Condition { get; private set; } = null;
         [PluginService] public static IPluginLog? Log { get; private set; } = null;
         [PluginService] public static IGameInteropProvider Interop { get; private set; } = null!;
 
-        public static SharedMemoryManager smm = new SharedMemoryManager();
         public static Configuration Config { get; private set; } = new Configuration();
 
         public string Name => "Fresh Set of Eyes";
@@ -51,12 +48,17 @@ namespace StopTheClip
         private const float NearClipOverride = 0.05f;
         private float origNearClip = 0.1f;
         private HookManager hookManager = new HookManager();
+        private readonly WindowSystem windowSystem = new("FreshSetOfEyes");
+        private PluginUI? mainWindow;
 
         private bool isEnabled = false;
         private bool inCutscene = false;
         private bool inGpose = false;
-        private bool isXIVRActive = false;
-        private bool origEnabled = false;
+        private bool inPvP = false;
+        private bool suspended = false;   // enabled, but standing down for combat / PvP
+
+        public string? SuspendReason => !isEnabled || !suspended ? null
+            : inPvP && !Config.AllowInPvP ? "Paused in PvP" : "Paused in combat";
         
         public Plugin()
         {
@@ -80,6 +82,8 @@ namespace StopTheClip
             iPluginInterface!.UiBuilder.OpenMainUi += ToggleUI;
 
             Initialize();
+            mainWindow = new PluginUI(this, DrawFirstPersonDebug);
+            windowSystem.AddWindow(mainWindow);
             Start();
         }
 
@@ -88,9 +92,7 @@ namespace StopTheClip
             Stop();
             DisposeFirstPerson();
             hookManager.DisposeFunctionHandles();
-            smm.SetClose(SharedMemoryPlugins.StopTheClip);
-            smm.Dispose();
-            //smm.OutputStatus();
+            windowSystem.RemoveAllWindows();
 
             ClientState!.Login -= OnLogin;
             ClientState!.Logout -= OnLogout;
@@ -103,7 +105,8 @@ namespace StopTheClip
             CommandManager!.RemoveHandler(LegacyCommandName);
         }
 
-        public void ToggleUI() => PluginUI.isVisible ^= true;
+        public bool IsEnabled => isEnabled;
+        public void ToggleUI() => mainWindow?.Toggle();
         private void OnCommand(string command, string argument)
         {
             if (string.IsNullOrEmpty(argument))
@@ -132,16 +135,13 @@ namespace StopTheClip
 
         private void DrawUI()
         {
-            bool curEnabled = isEnabled;
-            PluginUI.Draw(ref curEnabled, Config, DrawFirstPersonDebug);
+            windowSystem.Draw();
             DrawFirstPersonMarkers();
-            if (curEnabled != isEnabled)
-                Toggle();
         }
 
         private void OnLogin()
         {
-            if(isEnabled)
+            if (isEnabled && !suspended)
                 ClipManagerSetNearClip();
 
         }
@@ -156,7 +156,7 @@ namespace StopTheClip
             targetSystem->ObjectFilterArray2.Length = 0;
             targetSystem->ObjectFilterArray3.Length = 0;
 
-            if (isEnabled)
+            if (isEnabled && !suspended)
                 ClipManagerResetNearClip();
         }
 
@@ -170,31 +170,6 @@ namespace StopTheClip
                 TryCreateCameraUpdateHook();
 
             //----
-            // if xivr is open check to see if its active
-            // if so save the current active value and disable it
-            //----
-            if (smm.CheckOpen(SharedMemoryPlugins.XIVR))
-            {
-                bool xivrActive = smm.CheckActive(SharedMemoryPlugins.XIVR);
-                if(isXIVRActive != xivrActive)
-                {
-                    if(xivrActive)
-                    {
-                        origEnabled = isEnabled;
-                        if (isEnabled)
-                            Stop();
-                    }
-                    else
-                    {
-                        isEnabled = origEnabled;
-                        if (isEnabled)
-                            Start();
-                    }
-                    isXIVRActive = xivrActive;
-                }
-            }
-
-            //----
             // Group pose raises the cutscene flags too, but it's the player's
             // own camera, so it is not treated as a cutscene
             //----
@@ -203,6 +178,25 @@ namespace StopTheClip
                 inCutscene = !inGpose && (Condition![ConditionFlag.OccupiedInCutSceneEvent] || Condition![ConditionFlag.WatchingCutscene] || Condition![ConditionFlag.WatchingCutscene78]);
 
             inCombat = Condition![ConditionFlag.InCombat];
+            inPvP = ClientState!.IsPvP;
+
+            //----
+            // The plugin stands down in combat and in PvP unless the player has
+            // opted in (General tab, Experimental): the game's own near clip
+            // comes back and nothing is un-hidden or moved
+            //----
+            bool shouldSuspend = isEnabled && ((inCombat && !Config.AllowInCombat) || (inPvP && !Config.AllowInPvP));
+            if (shouldSuspend != suspended)
+            {
+                suspended = shouldSuspend;
+                if (isEnabled)
+                {
+                    if (suspended)
+                        ClipManagerResetNearClip();
+                    else
+                        ClipManagerSetNearClip();
+                }
+            }
             UpdateFirstPersonState();
         }
 
@@ -268,29 +262,23 @@ namespace StopTheClip
             InitializeFirstPerson();
 
             hookManager.SetFunctionHandles(this);
-            smm.SetOpen(SharedMemoryPlugins.StopTheClip);
         }
 
         public void Start()
         {
             hookManager.EnableFunctionHandles();
-            smm.SetActive(SharedMemoryPlugins.StopTheClip);
-            ClipManagerSetNearClip();
+            if (!suspended)
+                ClipManagerSetNearClip();
             isEnabled = true;
-            //PrintEcho("Clipping Enabled");
-            //Log!.Info($"STC Start: {isEnabled} {origEnabled}");
-            //smm.OutputStatus(this);
         }
 
         public void Stop()
         {
-            //PrintEcho("Clipping Disabled");
             isEnabled = false;
-            ClipManagerResetNearClip();
-            smm.SetInactive(SharedMemoryPlugins.StopTheClip);
+            if (!suspended)
+                ClipManagerResetNearClip();
+            suspended = false;
             hookManager.DisableFunctionHandles();
-            //Log!.Info($"STC Start: {isEnabled} {origEnabled}");
-            //smm.OutputStatus(this);
         }
 
         public void Toggle()
@@ -323,7 +311,7 @@ namespace StopTheClip
 
         private void RunGameTasksFn(TaskManager* taskManager, float* frameTiming)
         {
-            if (!isEnabled)
+            if (!isEnabled || suspended)
             {
                 RunGameTasksHook!.Original(taskManager, frameTiming);
                 return;

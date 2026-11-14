@@ -319,7 +319,7 @@ namespace StopTheClip
             nint gameObject = 0;
             bool active = false;
 
-            if (isEnabled && Config.FirstPersonFix && !inCutscene)
+            if (isEnabled && !suspended && Config.FirstPersonFix && !inCutscene)
             {
                 CSCameraManager* cameraManager = CSCameraManager.Instance();
                 if (cameraManager != null && cameraManager->ActiveCameraIndex == 0 && cameraManager->Camera != null)
@@ -819,7 +819,7 @@ namespace StopTheClip
             }
             else
             {
-                renderCamera->NearPlane = NearClipOverride;
+                renderCamera->NearPlane = suspended ? origNearClip : NearClipOverride;
                 faceClipApplied = false;
             }
         }
@@ -1487,7 +1487,7 @@ namespace StopTheClip
 
             ImGui.Spacing();
             ImGui.Separator();
-            Row("State", firstPersonActive ? (inGpose ? "True first person active (group pose)" : "True first person active")
+            Row("State", SuspendReason != null ? $"{SuspendReason} (General tab, Experimental)" : firstPersonActive ? (inGpose ? "True first person active (group pose)" : "True first person active")
                 : inGpose ? $"Inactive in group pose (zoom {dbgZoom:F2}, fully in at {dbgZoomMin:F2})" : $"Inactive (camera mode: {dbgControlMode})");
             Row("Skeleton", dbgStatus);
             Row("Eyes", $"{dbgEyeToHead * 100:F0} cm from head bone, via {dbgEyeMethod}");
