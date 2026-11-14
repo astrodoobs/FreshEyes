@@ -422,9 +422,20 @@ namespace StopTheClip
                         fWeap->CullType = ModelCullTypes.Visible;
                 }
 
-                Structures.Model* mount = (Structures.Model*)model->mountedObject;
-                if (mount != null)
-                    mount->CullType = ModelCullTypes.Visible;
+                //----
+                // The mount comes from the game's own mount container. It used
+                // to be read from a fixed offset inside the draw object, which
+                // a game patch moved: that offset now holds a skeleton, and
+                // writing the flag there corrupted it and crashed the game
+                // when the character was unloaded.
+                //----
+                Character* mountCharacter = character->Mount.MountObject;
+                if (mountCharacter != null)
+                {
+                    Structures.Model* mount = (Structures.Model*)mountCharacter->GameObject.DrawObject;
+                    if (mount != null)
+                        mount->CullType = ModelCullTypes.Visible;
+                }
                 
                 OrnamentContainer* oCont = &character->OrnamentData;
                 if (oCont != null)
