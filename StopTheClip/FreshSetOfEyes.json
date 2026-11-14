@@ -2,7 +2,7 @@
   "Author": "astrodoobs, Marulu, StreetRat",
   "Name": "Fresh Set of Eyes",
   "InternalName": "FreshSetOfEyes",
-  "AssemblyVersion": "0.0.2.0",
+  "AssemblyVersion": "0.0.3.0",
   "Punchline": "See the world through your character's eyes.",
   "Description": "True first person for FFXIV. The camera sits at your character's eyes and follows every animation, your own face is hidden while your body stays visible, your view turns to what you select, and head movement is limited to a natural range. Also stops nearby models from vanishing when the camera gets close and lowers the near clip for close-up screenshots. Open the settings with /fresheyes. Formerly StopTheClip, based on XIVR code by ProjectMimer.",
   "ApplicableVersion": "any",

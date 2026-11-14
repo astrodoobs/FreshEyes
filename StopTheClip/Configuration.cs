@@ -14,6 +14,7 @@ namespace StopTheClip
         // frame (so it follows emotes/animations) and the head is hidden
         //----
         public bool FirstPersonFix { get; set; } = true;
+        public bool GposeFirstPerson { get; set; } = true;   // zoomed fully in during group pose counts as first person
         public bool HideHead { get; set; } = true;
         public float FaceClipDistance { get; set; } = 0.15f;  // near clip used in true first person
         public float EyeForwardOffset { get; set; } = 0.0f;

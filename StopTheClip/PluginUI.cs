@@ -60,6 +60,10 @@ namespace StopTheClip
             ImGui.BeginDisabled(!isEnabled);
             Checkbox("True first person", config.FirstPersonFix, v => config.FirstPersonFix = v, config,
                 "When the game camera is in first person, look out of your\ncharacter's eyes: the view follows every animation and\nyou can see your own body.");
+            ImGui.BeginDisabled(!config.FirstPersonFix);
+            Checkbox("Also in group pose", config.GposeFirstPerson, v => config.GposeFirstPerson = v, config,
+                "In group pose, zooming all the way in looks out of the\neyes of the character the camera is centred on.\nUntick to keep the normal close-up camera there.");
+            ImGui.EndDisabled();
             ImGui.EndDisabled();
 
             ImGui.Spacing();

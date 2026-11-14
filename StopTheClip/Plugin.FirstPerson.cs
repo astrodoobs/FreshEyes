@@ -165,6 +165,12 @@ namespace StopTheClip
         // it in one step, so nothing accumulates between frames.
         //----
         private Matrix4x4 lastWrittenView, cleanView;
+        private Vector3 lastWrittenPos;
+        // Group pose camera offsets carried on top of the eye position
+        private const float MaxGposeOffset = 20.0f;
+        private Vector3 pivotBase, gposeOffset, externalOffset;
+        private nint pivotObject = 0;
+        private bool havePivot = false;
         private Vector3 cleanPos, cleanLook;
         private bool haveWrittenView = false, haveCleanView = false;
         private long dbgViewFresh, dbgViewStale;
@@ -316,20 +322,59 @@ namespace StopTheClip
             if (isEnabled && Config.FirstPersonFix && !inCutscene)
             {
                 CSCameraManager* cameraManager = CSCameraManager.Instance();
-                if (cameraManager != null && cameraManager->ActiveCameraIndex == 0 && cameraManager->Camera != null &&
-                    IsFirstPersonMode(cameraManager->Camera->ControlMode))
+                if (cameraManager != null && cameraManager->ActiveCameraIndex == 0 && cameraManager->Camera != null)
                 {
-                    var player = ObjectTable!.LocalPlayer;
-                    if (player != null)
+                    GameCamera* camera = cameraManager->Camera;
+                    dbgZoom = camera->Distance;
+                    dbgZoomMin = camera->MinDistance;
+                    if (inGpose)
                     {
-                        gameObject = player.Address;
-                        active = true;
+                        //----
+                        // Group pose has no first person of its own: zooming
+                        // all the way in stands in for it. Look out of the
+                        // character the group pose camera is centred on.
+                        //----
+                        bool zoomedIn = camera->Distance <= camera->MinDistance + (gposeZoomedIn ? 0.06f : 0.02f);
+                        gposeZoomedIn = zoomedIn;
+                        if (Config.GposeFirstPerson && (zoomedIn || IsFirstPersonMode(camera->ControlMode)))
+                        {
+                            gameObject = GetGposeCharacter();
+                            active = gameObject != 0;
+                        }
+                    }
+                    else if (IsFirstPersonMode(camera->ControlMode))
+                    {
+                        var player = ObjectTable!.LocalPlayer;
+                        if (player != null)
+                        {
+                            gameObject = player.Address;
+                            active = true;
+                        }
                     }
                 }
             }
 
             localGameObject = gameObject;
             firstPersonActive = active;
+            RecordPropState();
+        }
+
+        private bool gposeZoomedIn = false;
+        private float dbgZoom, dbgZoomMin;
+
+        //----
+        // The character the group pose camera is centred on, or your own
+        // posed copy when that isn't a character
+        //----
+        private nint GetGposeCharacter()
+        {
+            CSGameObject* target = targetSystem->GPoseTarget;
+            if (target != null && target->IsCharacter() && target->DrawObject != null)
+                return (nint)target;
+            nint self = ObjectTable!.GetObjectAddress(GposeFirstIndex);
+            if (self != 0 && ((CSGameObject*)self)->DrawObject != null)
+                return self;
+            return 0;
         }
 
         private static bool IsFirstPersonMode(CameraControlMode mode) =>
@@ -381,7 +426,10 @@ namespace StopTheClip
             }
         }
 
-        private void ProcessLocalSkeleton(RenderSkeleton* skeleton)
+        private nint headObject = 0;   // which character the head reading belongs to
+        private long dbgDirectReads = 0;
+
+        private void ProcessLocalSkeleton(RenderSkeleton* skeleton, bool replaceCamera = true)
         {
             if (skeleton->PartialSkeletonCount == 0 || skeleton->PartialSkeletons == null)
                 return;
@@ -501,6 +549,7 @@ namespace StopTheClip
                 bodyForward = forward;
                 headDeltaWorld = headDelta;
                 headFrame = frameCounter;
+                headObject = localGameObject;
             }
 
             dbgProcessed++;
@@ -515,7 +564,7 @@ namespace StopTheClip
             // If the camera already updated this frame, re-place it now with the
             // fresh head data (only safe on the main thread)
             //----
-            if (Environment.CurrentManagedThreadId == mainThreadId)
+            if (replaceCamera && Environment.CurrentManagedThreadId == mainThreadId)
             {
                 CSCameraManager* cameraManager = CSCameraManager.Instance();
                 if (cameraManager != null && cameraManager->Camera != null)
@@ -629,6 +678,9 @@ namespace StopTheClip
                 outValid = false;
                 haveWrittenView = false;
                 haveCleanView = false;
+                havePivot = false;
+                gposeOffset = Vector3.Zero;
+                externalOffset = Vector3.Zero;
                 focusRelease = 0.0f;
                 return;
             }
@@ -636,6 +688,27 @@ namespace StopTheClip
             CSCameraManager* cameraManager = CSCameraManager.Instance();
             if (cameraManager == null || cameraManager->Camera != camera)
                 return;
+
+            //----
+            // When animations aren't being updated (motion frozen in group
+            // pose) the skeleton hook doesn't run, so read the pose here
+            //----
+            if (frameCounter - headFrame >= 2 || headObject != localGameObject)
+            {
+                try
+                {
+                    RenderSkeleton* skeleton = GetLocalSkeleton();
+                    if (skeleton != null)
+                    {
+                        ProcessLocalSkeleton(skeleton, false);
+                        dbgDirectReads++;
+                    }
+                }
+                catch (Exception e)
+                {
+                    dbgError = e.Message;
+                }
+            }
 
             PlaceFirstPersonCamera(camera, true);
         }
@@ -784,7 +857,7 @@ namespace StopTheClip
                 // instead of handing back to the game's camera
                 //----
                 long age = frameCounter - headFrame;
-                if (age > 30)
+                if (age > 30 || headObject != localGameObject)
                     return;
                 eye = eyeLocal;
                 neck = neckLocal;
@@ -859,15 +932,34 @@ namespace StopTheClip
             if (!fromCameraUpdate)
             {
                 // Already placed this frame: only refresh the position part
-                Vector3 shift = ComputeEye(eye, neck, bodyFwd, look) - gamePos;
-                if (shift.LengthSquared() < 1e-10f)
+                //----
+                // Group pose: if something moved the camera since we placed it
+                // (Brio adds its position offset after the game's update), that
+                // is a deliberate offset, so carry it instead of undoing it
+                //----
+                Vector3 matrixPos = gamePos;
+                if (inGpose && haveWrittenView)
+                {
+                    Vector3 moved = gamePos - lastWrittenPos;
+                    if (moved.LengthSquared() > 1e-10f && moved.LengthSquared() < MaxGposeOffset * MaxGposeOffset)
+                        externalOffset += moved;
+                    // Our matrix is still in place: it belongs to where we put the camera
+                    if (SameMatrix(gameView, lastWrittenView))
+                        matrixPos = lastWrittenPos;
+                }
+                Vector3 wanted = ComputeEye(eye, neck, bodyFwd, look) + gposeOffset + externalOffset;
+                Vector3 shift = wanted - gamePos;
+                Vector3 matrixShift = wanted - matrixPos;
+                if (shift.LengthSquared() < 1e-10f && matrixShift.LengthSquared() < 1e-10f)
                     return;
-                scene.Position = gamePos + shift;
+                scene.Position = wanted;
                 scene.LookAtVector = gameLookAt + shift;
-                scene.ViewMatrix = Matrix4x4.CreateTranslation(-shift) * gameView;
+                scene.ViewMatrix = Matrix4x4.CreateTranslation(-matrixShift) * gameView;
                 lastWrittenView = scene.ViewMatrix;
-                cameraEyeGap = Math.Min(Vector3.Distance(gamePos + shift, liveEye), 0.5f);
-                UpdateAutoFaceClip(gamePos + shift, look);
+                lastWrittenPos = wanted;
+                dbgCamAfter = wanted;
+                cameraEyeGap = Math.Min(Vector3.Distance(wanted, liveEye), 0.5f);
+                UpdateAutoFaceClip(wanted, look);
                 ApplyFaceClip();
                 return;
             }
@@ -1071,7 +1163,33 @@ namespace StopTheClip
                 viewDir = new Vector3(MathF.Sin(vy) * MathF.Cos(vp), MathF.Sin(vp), MathF.Cos(vy) * MathF.Cos(vp));
             }
 
-            Vector3 eyePos = ComputeEye(eye, neck, bodyFwd, lookC);
+            //----
+            // Group pose: moving the camera's pivot (the game's own camera pan,
+            // or Brio's position offset) moves the view away from the eyes by
+            // the same amount, measured from where the pivot was on entering
+            // first person
+            //----
+            externalOffset = Vector3.Zero;
+            if (inGpose)
+            {
+                Vector3 pivot = gameLookAt - root;
+                if (!havePivot || pivotObject != localGameObject)
+                {
+                    pivotBase = pivot;
+                    pivotObject = localGameObject;
+                    havePivot = true;
+                }
+                gposeOffset = pivot - pivotBase;
+                if (gposeOffset.LengthSquared() < 1e-8f || gposeOffset.LengthSquared() > MaxGposeOffset * MaxGposeOffset)
+                    gposeOffset = Vector3.Zero;
+            }
+            else
+            {
+                havePivot = false;
+                gposeOffset = Vector3.Zero;
+            }
+
+            Vector3 eyePos = ComputeEye(eye, neck, bodyFwd, lookC) + gposeOffset;
 
             //----
             // Apply the change to the game's own view matrix as a delta, so it
@@ -1091,6 +1209,7 @@ namespace StopTheClip
             haveWrittenView = true;
             scene.Position = eyePos;
             scene.LookAtVector = eyePos + viewDir * lookDist;
+            lastWrittenPos = eyePos;
 
             float changeDeg = 2.0f * MathF.Acos(Math.Clamp(MathF.Abs(change.W), 0, 1)) / Deg2Rad;
             dbgView = $"delta rotation {changeDeg:F1} deg, game matrix fresh {dbgViewFresh} stale {dbgViewStale}";
@@ -1114,7 +1233,7 @@ namespace StopTheClip
             relYaw = 0;
             pitch = 0;
 
-            CSGameObject* target = Config.FocusOnTarget ? targetSystem->Target : null;
+            CSGameObject* target = Config.FocusOnTarget && !inGpose ? targetSystem->Target : null;
             if (target == null || (nint)target == localGameObject)
             {
                 lastTarget = 0;
@@ -1368,7 +1487,8 @@ namespace StopTheClip
 
             ImGui.Spacing();
             ImGui.Separator();
-            Row("State", firstPersonActive ? "True first person active" : $"Inactive (camera mode: {dbgControlMode})");
+            Row("State", firstPersonActive ? (inGpose ? "True first person active (group pose)" : "True first person active")
+                : inGpose ? $"Inactive in group pose (zoom {dbgZoom:F2}, fully in at {dbgZoomMin:F2})" : $"Inactive (camera mode: {dbgControlMode})");
             Row("Skeleton", dbgStatus);
             Row("Eyes", $"{dbgEyeToHead * 100:F0} cm from head bone, via {dbgEyeMethod}");
             if (dbgError.Length > 0)
@@ -1388,8 +1508,13 @@ namespace StopTheClip
             {
                 CSCameraManager* cm = CSCameraManager.Instance();
                 ImGui.TextUnformatted($"enabled={isEnabled} cutscene={inCutscene} camIndex={(cm != null ? cm->ActiveCameraIndex : -1)}");
+                ImGui.TextUnformatted($"group pose={inGpose} zoom={dbgZoom:F2} (min {dbgZoomMin:F2}) character={localGameObject:X} direct reads={dbgDirectReads}");
+                ImGui.TextUnformatted($"group pose offset: pivot {Fmt(gposeOffset)}  external {Fmt(externalOffset)}");
                 ImGui.TextUnformatted($"hooks: anim={UpdateAnimationsHook?.IsEnabled} cam={CameraUpdateHook?.IsEnabled}");
                 ImGui.TextUnformatted($"characters un-hidden: start {visibilityFlips[0]}, mid {visibilityFlips[1]}, end {visibilityFlips[2]}");
+                ImGui.TextUnformatted(WeaponSlotText());
+                if (propHistory.Count > 0)
+                    ImGui.TextUnformatted("prop history:\n  " + string.Join("\n  ", propHistory));
                 ImGui.TextUnformatted($"draw vs skeleton position: {dbgDrawVsSkel * 100:F1} cm");
                 ImGui.TextUnformatted($"calls: anim={dbgUpdateAnimCalls} processed={dbgProcessed} camUpd={dbgCameraUpdateCalls} placed={dbgCameraPlaced} late head={dbgStaleFrames}");
                 ImGui.TextUnformatted($"bones: j_kao={dbgHeadIndex} j_kubi={dbgNeckIndex} partials={dbgPartials} eyes via {dbgConnect}");
@@ -1405,6 +1530,8 @@ namespace StopTheClip
             if (ImGui.Button("Copy diagnostics"))
                 ImGui.SetClipboardText(
                     $"active={firstPersonActive} mode={dbgControlMode} status={dbgStatus} err={dbgError}\n" +
+                    WeaponSlotText() + "\nprop history:\n  " + string.Join("\n  ", propHistory) + "\n" +
+                    $"gpose={inGpose} zoom={dbgZoom:F2}/{dbgZoomMin:F2} camIndex={(CSCameraManager.Instance() != null ? CSCameraManager.Instance()->ActiveCameraIndex : -1)} directReads={dbgDirectReads} pivotOff={Fmt(gposeOffset)} extOff={Fmt(externalOffset)}\n" +
                     $"view={dbgView} faceClip={faceClipApplied} look={dbgRelYaw:F1}/{dbgPitch:F1} headRot={dbgHeadAngle:F1} follow={headFollowWeight:F2} combat={inCombat} bodyTurning={bodyTurnHold > 0}\n" +
                     $"focus={dbgFocus}\nrates={yawRate.Rate:F2}{(yawRate.Confident ? "" : "?")}/{pitchRate.Rate:F2}{(pitchRate.Confident ? "" : "?")}\n" +
                     $"calls anim={dbgUpdateAnimCalls} proc={dbgProcessed} cam={dbgCameraUpdateCalls} placed={dbgCameraPlaced} kao={dbgHeadIndex} kubi={dbgNeckIndex} map={dbgConnect}\n" +
@@ -1419,6 +1546,51 @@ namespace StopTheClip
         private static float SteerRate(AngleRate rate) => rate.Confident ? rate.Rate : 1.0f;
 
         private static string RateText(AngleRate rate) => rate.Confident ? $"{rate.Rate:F2}" : "measuring…";
+
+        //----
+        // State of the three weapon slots (main hand, off hand, emote prop)
+        //----
+        // Recent changes to the emote prop slot, to see how the game hides it
+        private long propStateClears = 0;
+        private readonly List<string> propHistory = new();
+        private string lastPropState = "";
+        private readonly System.Diagnostics.Stopwatch propClock = System.Diagnostics.Stopwatch.StartNew();
+
+        private void RecordPropState()
+        {
+            nint gameObject = ObjectTable!.LocalPlayer?.Address ?? 0;
+            if (gameObject == 0)
+                return;
+            var drawData = &((FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)gameObject)->DrawData;
+            ref var slot = ref drawData->Weapon(FFXIVClientStructs.FFXIV.Client.Game.Character.DrawDataContainer.WeaponSlot.System);
+            var model = (Structures.Model*)slot.DrawData.DrawObject;
+            string state = $"id={slot.ModelId.Id} model={(model != null ? $"{(byte)model->CullType:X2}" : "none")} state={slot.State:X2} f1={slot.Flags1:X4} f2={slot.Flags2:X2} hideWeapons={drawData->IsWeaponHidden} fp={firstPersonActive}";
+            if (state == lastPropState)
+                return;
+            lastPropState = state;
+            propHistory.Add($"{propClock.Elapsed.TotalSeconds,7:F2}s {state}");
+            if (propHistory.Count > 16)
+                propHistory.RemoveAt(0);
+        }
+
+        private string WeaponSlotText()
+        {
+            nint gameObject = localGameObject;
+            if (gameObject == 0)
+                gameObject = ObjectTable!.LocalPlayer?.Address ?? 0;
+            if (gameObject == 0)
+                return "weapons: no character";
+            var drawData = &((FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)gameObject)->DrawData;
+            string text = $"weapons hidden={drawData->IsWeaponHidden} prop state cleared {propStateClears} times";
+            string[] names = { "main", "off", "prop" };
+            for (int i = 0; i < 3; i++)
+            {
+                ref var slot = ref drawData->Weapon((FFXIVClientStructs.FFXIV.Client.Game.Character.DrawDataContainer.WeaponSlot)i);
+                var model = (Structures.Model*)slot.DrawData.DrawObject;
+                text += $"\n  {names[i]}: id={slot.ModelId.Id} model={(model != null ? $"flags {(byte)model->CullType:X2}" : "none")} state={slot.State:X2} f1={slot.Flags1:X4} f2={slot.Flags2:X2}";
+            }
+            return text;
+        }
 
         private static string Fmt(Vector3 v) => $"{v.X,8:F3} {v.Y,8:F3} {v.Z,8:F3}";
 

@@ -54,6 +54,7 @@ namespace StopTheClip
 
         private bool isEnabled = false;
         private bool inCutscene = false;
+        private bool inGpose = false;
         private bool isXIVRActive = false;
         private bool origEnabled = false;
         
@@ -72,6 +73,8 @@ namespace StopTheClip
             ClientState!.Login += OnLogin;
             ClientState!.Logout += OnLogout;
             iFramework!.Update += Update;
+            // Keep the settings window available in group pose (Dalamud hides plugin windows there by default)
+            iPluginInterface!.UiBuilder.DisableGposeUiHide = true;
             iPluginInterface!.UiBuilder.Draw += DrawUI;
             iPluginInterface!.UiBuilder.OpenConfigUi += ToggleUI;
             iPluginInterface!.UiBuilder.OpenMainUi += ToggleUI;
@@ -191,8 +194,13 @@ namespace StopTheClip
                 }
             }
 
+            //----
+            // Group pose raises the cutscene flags too, but it's the player's
+            // own camera, so it is not treated as a cutscene
+            //----
+            inGpose = FFXIVClientStructs.FFXIV.Client.Game.GameMain.IsInGPose();
             if (isEnabled)
-                inCutscene = Condition![ConditionFlag.OccupiedInCutSceneEvent] || Condition![ConditionFlag.WatchingCutscene] || Condition![ConditionFlag.WatchingCutscene78];
+                inCutscene = !inGpose && (Condition![ConditionFlag.OccupiedInCutSceneEvent] || Condition![ConditionFlag.WatchingCutscene] || Condition![ConditionFlag.WatchingCutscene78]);
 
             inCombat = Condition![ConditionFlag.InCombat];
             UpdateFirstPersonState();
@@ -359,7 +367,7 @@ namespace StopTheClip
         }
 
 
-        private void CheckVisibilityInner(Character* character)
+        private void CheckVisibilityInner(Character* character, bool requireTargetable = true)
         {
             if (character == null)
                 return;
@@ -375,13 +383,42 @@ namespace StopTheClip
                 if (model == null)
                     return;
 
-                if (model->CullType == ModelCullTypes.InsideCamera && ((byte)character->GameObject.TargetableStatus & 2) == 2)
+                if (model->CullType == ModelCullTypes.InsideCamera && (!requireTargetable || ((byte)character->GameObject.TargetableStatus & 2) == 2))
                 {
                     model->CullType = ModelCullTypes.Visible;
                     visibilityFlips[visibilitySite]++;
                 }
                 
                 DrawDataContainer* drawData = &character->DrawData;
+
+                //----
+                // Emote props (books, cups, instruments) live in the third
+                // weapon slot. They are shown even when the player has weapon
+                // display switched off. The game unloads the prop when the
+                // emote ends, so a loaded prop is always one in use.
+                //----
+                if (drawData != null)
+                {
+                    ref var prop = ref drawData->Weapon(DrawDataContainer.WeaponSlot.System);
+                    Structures.Model* propModel = (Structures.Model*)prop.DrawData.DrawObject;
+                    if (propModel != null)
+                    {
+                        if (drawData->IsWeaponHidden && propModel->CullType == ModelCullTypes.InsideCamera)
+                            propModel->CullType = ModelCullTypes.Visible;
+
+                        //----
+                        // In first person the game also marks the prop itself as
+                        // put away (lowest bit of its state) shortly after the
+                        // camera goes in, which hides it whatever its draw flags
+                        //----
+                        if ((nint)character == localGameObject && firstPersonActive && (prop.State & 1) != 0)
+                        {
+                            prop.State &= 0xFE;
+                            propStateClears++;
+                        }
+                    }
+                }
+
                 if (drawData != null && !drawData->IsWeaponHidden)
                 {
                     Structures.Model* mhWeap = (Structures.Model*)drawData->Weapon(DrawDataContainer.WeaponSlot.MainHand).DrawData.DrawObject;
@@ -414,6 +451,9 @@ namespace StopTheClip
                 }
             }
         }
+        private const int GposeFirstIndex = 201;
+        private const int GposeEndIndex = 249;
+
         private void CheckVisibility()
         {
             IPlayerCharacter? player = Plugin.ObjectTable!.LocalPlayer;
@@ -422,6 +462,21 @@ namespace StopTheClip
 
             if (inCutscene)
                 return;
+
+            //----
+            // Group pose: the posed characters are copies in their own block
+            // of the object table, and aren't flagged as targetable
+            //----
+            if (inGpose)
+            {
+                for (int i = GposeFirstIndex; i < GposeEndIndex; i++)
+                {
+                    nint address = Plugin.ObjectTable!.GetObjectAddress(i);
+                    if (address != 0)
+                        CheckVisibilityInner((Character*)address, false);
+                }
+                return;
+            }
 
             //----
             // Check the player
